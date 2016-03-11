@@ -13,8 +13,8 @@ RUN apt-get update && apt-get install -y \
     libturbojpeg \
     libjpeg-turbo8-dev \
     libgl1-mesa-dri-lts-vivid \
-    libopenni2-dev \
-    && rm -rf /var/lib/apt/lists/*
+    libopenni2-dev
+    # && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root/
 
@@ -27,6 +27,7 @@ RUN git clone https://github.com/OpenKinect/libfreenect2.git \
   && apt-get install -f -y
 
 RUN cd libfreenect2 \
+  && git checkout v0.1.1 \
   && mkdir build && cd build \
   && cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/freenect2 -DENABLE_CXX11=ON \
   && make -j8 \

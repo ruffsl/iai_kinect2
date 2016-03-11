@@ -7,6 +7,10 @@ RUN mkdir -p catkin_ws/src \
   && cd catkin_ws/src \
   && git clone https://github.com/code-iai/iai_kinect2.git
 
-# build omnimapper ros wrapper
-ADD build.sh catkin_ws/src/ros_caffe/build.sh
-RUN ./catkin_ws/src/ros_caffe/build.sh
+# rosdeb
+ADD rosdeb.bash catkin_ws/src/iai_kinect2/rosdeb.bash
+RUN ./catkin_ws/src/iai_kinect2/rosdeb.bash
+
+# build
+ADD build.bash catkin_ws/src/iai_kinect2/build.bash
+RUN ./catkin_ws/src/iai_kinect2/build.bash

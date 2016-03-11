@@ -10,7 +10,7 @@ help:
 
 build:
 	@docker build --tag=iai_kinect2:indigo-ros-cuda          indigo-ros-cuda/.
-	@docker build --tag=iai_kinect2:libfreenect2           	 libfreenect2/.
+	@docker build --tag=iai_kinect2:libfreenect2          	 libfreenect2/.
 	@docker build --tag=iai_kinect2:iai_kinect2           	 iai_kinect2/.
 
 clean:
