@@ -25,6 +25,7 @@
 #include <mutex>
 #include <chrono>
 #include <sys/stat.h>
+#include <stack>          // std::stack
 
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -33,6 +34,7 @@
 #endif
 
 #include <opencv2/opencv.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 #include <ros/ros.h>
 #include <nodelet/nodelet.h>
@@ -42,6 +44,9 @@
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/image_encodings.h>
+
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h>
 
 #include <tf/transform_broadcaster.h>
 
@@ -1607,6 +1612,10 @@ private:
   libfreenect2::Freenect2Device::ColorCameraParams colorParams;
   libfreenect2::Freenect2Device::IrCameraParams irParams;
 
+  message_filters::TimeSynchronizer<sensor_msgs::Image, sensor_msgs::Image> sync;
+  std::stack<sensor_msgs::Image> colorStack;
+  std::stack<sensor_msgs::Image> depthStack;
+
   ros::NodeHandle nh, priv_nh;
 
   DepthRegistration *depthRegLowRes, *depthRegHighRes;
@@ -1668,7 +1677,7 @@ public:
   Kinect2Registration(const ros::NodeHandle &nh = ros::NodeHandle(), const ros::NodeHandle &priv_nh = ros::NodeHandle("~"))
     : sizeColor(1920, 1080), sizeIr(512, 424), sizeLowRes(sizeColor.width / 2, sizeColor.height / 2), color(sizeColor.width, sizeColor.height, 4), nh(nh), priv_nh(priv_nh),
       frameColor(0), frameIrDepth(0), pubFrameColor(0), pubFrameIrDepth(0), lastColor(0, 0), lastDepth(0, 0), nextColor(false),
-      nextIrDepth(false), depthShift(0), running(false), deviceActive(false), clientConnected(false)
+      nextIrDepth(false), depthShift(0), running(false), deviceActive(false), clientConnected(false), sync(10)
   {
     status.resize(COUNT_IN, UNSUBCRIBED);
   }
@@ -2035,6 +2044,29 @@ private:
 //    infoHDPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_HD + K2_TOPIC_INFO, queueSize, cb, cb);
 //    infoQHDPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_QHD + K2_TOPIC_INFO, queueSize, cb, cb);
 //    infoIRPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_SD + K2_TOPIC_INFO, queueSize, cb, cb);
+
+    message_filters::Subscriber<sensor_msgs::Image> color_sub(nh, base_name + K2_TOPIC_HD K2_TOPIC_IMAGE_COLOR, queueSize);
+    message_filters::Subscriber<sensor_msgs::Image> depth_sub(nh, base_name + K2_TOPIC_SD K2_TOPIC_IMAGE_DEPTH, queueSize);
+    sync(color_sub, depth_sub, 10);
+    sync.registerCallback(boost::bind(&imageCallback, _1, _2));
+
+  }
+
+  bool imageCallback(const sensor_msgs::ImageConstPtr& color, const sensor_msgs::ImageConstPtr& depth)
+  {
+      sensor_msgs::Image colorImage(*color);
+      sensor_msgs::Image depthImage(*depth);
+      bool addedImages = false;
+      for(; !addedImages;){
+          if(lockColor.try_lock() && lockIrDepth.try_lock()){
+              colorStack.push(colorImage);
+              depthStack.push(depthImage);
+              addedImages = true;
+          }
+      }
+//      listenerIrDepth->impl_:depth = depth;
+//      listenerColor->impl_:color = color;
+      return true;
   }
 
   bool initDevice(std::string &sensor)
@@ -2371,17 +2403,31 @@ private:
     std::vector<Status> status = this->status;
     size_t frame;
 
-    if(!receiveFrames(listenerIrDepth, frames))
+    if(depthStack.empty())
     {
       lockIrDepth.unlock();
       return;
     }
     double now = ros::Time::now().toSec();
 
-    header = createHeader(lastDepth, lastColor);
+//    header = createHeader(lastDepth, lastColor);
+//    libfreenect2::Frame *irFrame = frames[libfreenect2::Frame::Ir];
+//    libfreenect2::Frame *depthFrame = frames[libfreenect2::Frame::Depth];
 
-    libfreenect2::Frame *irFrame = frames[libfreenect2::Frame::Ir];
-    libfreenect2::Frame *depthFrame = frames[libfreenect2::Frame::Depth];
+    sensor_msgs::Image depthImage = depthStack.top();
+    depthStack.pop();
+    header = depthImage.header;
+    // Get the image
+    cv_bridge::CvImagePtr subscribed_ptr;
+    try
+    {
+        subscribed_ptr = cv_bridge::toCvCopy(depthImage, "32fc1");
+    }
+    catch(cv_bridge::Exception& e)
+    {
+        ROS_ERROR("cv_bridge exception: %s", e.what());
+        return;
+    }
 
 #if LIBFREENECT2_API_VERSION >= 2
     if(irFrame->status != 0 || depthFrame->status != 0)
@@ -2406,16 +2452,17 @@ private:
 
     if(status[COLOR_SD_RECT] || status[DEPTH_SD] || status[DEPTH_SD_RECT] || status[DEPTH_QHD] || status[DEPTH_HD])
     {
-      cv::Mat(depthFrame->height, depthFrame->width, CV_32FC1, depthFrame->data).copyTo(depth);
+//      cv::Mat(depthFrame->height, depthFrame->width, CV_32FC1, depthFrame->data).copyTo(depth);
+        cv::Mat depth = subscribed_ptr->image;
     }
 
-    if(status[IR_SD] || status[IR_SD_RECT])
-    {
-      ir = cv::Mat(irFrame->height, irFrame->width, CV_32FC1, irFrame->data);
-      ir.convertTo(images[IR_SD], CV_16U);
-    }
+//    if(status[IR_SD] || status[IR_SD_RECT])
+//    {
+//      ir = cv::Mat(irFrame->height, irFrame->width, CV_32FC1, irFrame->data);
+//      ir.convertTo(images[IR_SD], CV_16U);
+//    }
 
-    listenerIrDepth->release(frames);
+//    listenerIrDepth->release(frames);
     lockIrDepth.unlock();
 
     processIrDepth(depth, images, status);
@@ -2436,16 +2483,29 @@ private:
     std::vector<Status> status = this->status;
     size_t frame;
 
-    if(!receiveFrames(listenerColor, frames))
+    if(colorStack.empty())
     {
       lockColor.unlock();
       return;
     }
     double now = ros::Time::now().toSec();
 
-    header = createHeader(lastColor, lastDepth);
-
-    libfreenect2::Frame *colorFrame = frames[libfreenect2::Frame::Color];
+//    header = createHeader(lastColor, lastDepth);
+//    libfreenect2::Frame *colorFrame = frames[libfreenect2::Frame::Color];
+    sensor_msgs::Image colorImage = colorStack.top();
+    colorStack.pop();
+    header = colorImage.header;
+    // Get the image
+    cv_bridge::CvImagePtr subscribed_ptr;
+    try
+    {
+        subscribed_ptr = cv_bridge::toCvCopy(colorImage, "8uc4");
+    }
+    catch(cv_bridge::Exception& e)
+    {
+        ROS_ERROR("cv_bridge exception: %s", e.what());
+        return;
+    }
 
 #if LIBFREENECT2_API_VERSION >= 2
     if(colorFrame->status != 0)
@@ -2468,7 +2528,10 @@ private:
 
     frame = frameColor++;
 
-    cv::Mat color = cv::Mat(colorFrame->height, colorFrame->width, CV_8UC4, colorFrame->data);
+//    cv::Mat color = cv::Mat(colorFrame->height, colorFrame->width, CV_8UC4, colorFrame->data);
+    cv::Mat color = subscribed_ptr->image;
+//    libfreenect2::Frame colorFrameData(color.size().width, color.size().height,);
+//    libfreenect2::Frame *colorFrame = &colorFrameData;
     if(status[COLOR_SD_RECT])
     {
       lockRegSD.lock();
@@ -2495,7 +2558,7 @@ private:
 #endif
     }
 
-    listenerColor->release(frames);
+//    listenerColor->release(frames);
     lockColor.unlock();
 
     processColor(images, status);
@@ -2514,7 +2577,8 @@ private:
     for(; !newFrames;)
     {
 #ifdef LIBFREENECT2_THREADING_STDLIB
-      newFrames = listener->waitForNewFrame(frames, 1000);
+//      newFrames = istener->waitForNewFrame(frames, 1000);
+      newFrames = (!colorStack.empty())||(!depthStack.empty());
 #else
       newFrames = true;
       listener->waitForNewFrame(frames);
